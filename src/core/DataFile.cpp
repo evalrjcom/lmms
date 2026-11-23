@@ -37,6 +37,7 @@
 #include <QMessageBox>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QScopeGuard>
 
 #include "base64.h"
 #include "ConfigManager.h"
@@ -343,10 +344,15 @@ bool DataFile::writeFile(const QString& filename, bool withResources)
 	const QString fullName = withResources
 		? nameWithExtension(bundleDir + "/" + fInfo.fileName())
 		: nameWithExtension(filename);
-	const QString fullNameTemp = fullName + ".new";
 	const QString fullNameBak = fullName + ".bak";
 
 	using gui::SongEditor;
+
+	// Clean up a bundle created by this call if any later step fails.
+	bool createdBundle = false;
+	auto cleanupBundle = qScopeGuard([&] {
+		if (createdBundle) { QDir(bundleDir).removeRecursively(); }
+	});
 
 	// If we are saving with resources, setup the bundle folder first
 	if (withResources)
@@ -372,6 +378,8 @@ bool DataFile::writeFile(const QString& filename, bool withResources)
 			return false;
 		}
 
+		createdBundle = true;
+
 		// Create resources folder
 		if (!QDir().mkdir(resourcesDir))
 		{
@@ -389,7 +397,8 @@ bool DataFile::writeFile(const QString& filename, bool withResources)
 		}
 	}
 
-	QSaveFile outfile(fullNameTemp);
+	// Commit directly to the destination so a failed save leaves the current project in place.
+	QSaveFile outfile(fullName);
 
 	if (!outfile.open(QIODevice::WriteOnly | QIODevice::Truncate))
 	{
@@ -401,41 +410,52 @@ bool DataFile::writeFile(const QString& filename, bool withResources)
 		return false;
 	}
 
+	auto saveError = [&] {
+		showError(SongEditor::tr("Could not write file"),
+			SongEditor::tr("An unknown error has occurred and the file could not be saved."));
+		return false;
+	};
+
 	const QString extension = fullName.section('.', -1);
 	if (extension == "mmpz" || extension == "xptz")
 	{
 		QString xml;
-		QTextStream ts( &xml );
-		write( ts );
-		outfile.write( qCompress( xml.toUtf8() ) );
+		QTextStream ts(&xml);
+		write(ts);
+		ts.flush();
+		const auto compressed = qCompress(xml.toUtf8());
+		if (ts.status() != QTextStream::Ok || compressed.isEmpty()
+			|| outfile.write(compressed) != compressed.size()) { return saveError(); }
 	}
 	else
 	{
-		QTextStream ts( &outfile );
-		write( ts );
+		QTextStream ts(&outfile);
+		write(ts);
+		ts.flush();
+		if (ts.status() != QTextStream::Ok) { return saveError(); }
 	}
 
-	if (!outfile.commit())
+	if (!ConfigManager::inst()->value("app", "disablebackup").toInt()
+		&& QFileInfo::exists(fullName))
 	{
-		showError(SongEditor::tr("Could not write file"),
-			SongEditor::tr("An unknown error has occurred and the file could not be saved."));
-		return false;
+		// Replace the backup atomically, keeping the current project in place until commit.
+		QFile currentFile(fullName);
+		QSaveFile backup(fullNameBak);
+		if (!currentFile.open(QIODevice::ReadOnly) || !backup.open(QIODevice::WriteOnly))
+		{
+			return saveError();
+		}
+		char buffer[16384];
+		qint64 bytesRead;
+		while ((bytesRead = currentFile.read(buffer, sizeof(buffer))) > 0)
+		{
+			if (backup.write(buffer, bytesRead) != bytesRead) { return saveError(); }
+		}
+		if (bytesRead < 0 || !backup.commit()) { return saveError(); }
 	}
 
-	if (ConfigManager::inst()->value("app", "disablebackup").toInt())
-	{
-		// remove current file
-		QFile::remove(fullName);
-	}
-	else
-	{
-		// remove old backup file
-		QFile::remove(fullNameBak);
-		// move current file to backup file
-		QFile::rename(fullName, fullNameBak);
-	}
-	// move temporary file to current file
-	QFile::rename(fullNameTemp, fullName);
+	if (!outfile.commit()) { return saveError(); }
+	cleanupBundle.dismiss();
 
 	return true;
 }
