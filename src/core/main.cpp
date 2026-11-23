@@ -391,7 +391,8 @@ int main( int argc, char * * argv )
 
 			if( argc > i+1 ) // output file specified
 			{
-				dataFile.writeFile( QString::fromLocal8Bit( argv[i+1] ) );
+				// Propagate write failures to scripts invoking the upgrade command.
+				return dataFile.writeFile(QString::fromLocal8Bit(argv[i+1])) ? EXIT_SUCCESS : EXIT_FAILURE;
 			}
 			else // no output file specified; use stdout
 			{
@@ -416,8 +417,9 @@ int main( int argc, char * * argv )
 			if (argc > i+1) // Project bundle file name given
 			{
 				printf("Making bundle\n");
-				dataFile.writeFile(QString::fromLocal8Bit(argv[i+1]), true);
-				return EXIT_SUCCESS;
+				// Report a failed bundle save to the calling process.
+				return dataFile.writeFile(QString::fromLocal8Bit(argv[i+1]), true)
+					? EXIT_SUCCESS : EXIT_FAILURE;
 			}
 			else
 			{
