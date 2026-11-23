@@ -77,35 +77,27 @@ public:
 		other.clear();
 	}
 
-	ArrayVector(size_type count, const T& value) noexcept(std::is_nothrow_copy_constructible_v<T>) :
-		m_size{count}
+	ArrayVector(size_type count, const T& value)
 	{
-		assert(count <= N);
+		requireCapacity(count);
 		std::uninitialized_fill_n(begin(), count, value);
+		m_size = count;
 	}
 
-	explicit ArrayVector(size_type count) noexcept(std::is_nothrow_default_constructible_v<T>) :
-		m_size{count}
+	explicit ArrayVector(size_type count)
 	{
-		assert(count <= N);
+		requireCapacity(count);
 		std::uninitialized_value_construct_n(begin(), count);
+		m_size = count;
 	}
 
 	template<std::input_iterator It>
 	ArrayVector(It first, It last)
 	{
-		// Can't check the size first as the iterator may not be multipass
-		const auto end = std::uninitialized_copy(first, last, begin());
-		m_size = end - begin();
-		assert(m_size <= N);
+		appendRange(first, last);
 	}
 
-	ArrayVector(std::initializer_list<T> il) noexcept(std::is_nothrow_copy_constructible_v<T>) :
-		m_size{il.size()}
-	{
-		assert(il.size() <= N);
-		std::uninitialized_copy(il.begin(), il.end(), begin());
-	}
+	ArrayVector(std::initializer_list<T> il) : ArrayVector(il.begin(), il.end()) {}
 
 	~ArrayVector() { std::destroy(begin(), end()); }
 
@@ -139,9 +131,8 @@ public:
 	}
 
 	ArrayVector& operator=(std::initializer_list<T> il)
-		noexcept(std::is_nothrow_copy_assignable_v<T> && std::is_nothrow_copy_constructible_v<T>)
 	{
-		assert(il.size() <= N);
+		if (il.size() > N) { throw std::length_error{"size exceeds maximum size"}; }
 		const auto toAssign = std::min(il.size(), size());
 		const auto assignedFromEnd = il.begin() + toAssign;
 		const auto assignedToEnd = std::copy(il.begin(), assignedFromEnd, begin());
@@ -152,9 +143,8 @@ public:
 	}
 
 	void assign(size_type count, const T& value)
-		noexcept(std::is_nothrow_copy_assignable_v<T> && std::is_nothrow_copy_constructible_v<T>)
 	{
-		assert(count <= N);
+		if (count > N) { throw std::length_error{"size exceeds maximum size"}; }
 		const auto temp = value;
 		const auto toAssign = std::min(count, size());
 		const auto toConstruct = count - toAssign;
@@ -172,10 +162,15 @@ public:
 		for (; first != last && pos != end(); ++pos, ++first) {
 			*pos = *first;
 		}
-		std::destroy(pos, end());
-		pos = std::uninitialized_copy(first, last, pos);
-		m_size = pos - begin();
-		assert(m_size <= N);
+		if (first == last)
+		{
+			std::destroy(pos, end());
+			m_size = pos - begin();
+		}
+		else
+		{
+			appendRange(first, last);
+		}
 	}
 
 	reference at(size_type index)
@@ -244,25 +239,25 @@ public:
 
 	iterator insert(const_iterator pos, size_type count, const T& value)
 	{
-		assert(m_size + count <= N);
+		requireCapacity(count);
 		assert(cbegin() <= pos && pos <= cend());
 		const auto mutPos = begin() + (pos - cbegin());
-		const auto newEnd = std::uninitialized_fill_n(end(), count, value);
-		std::rotate(mutPos, end(), newEnd);
+		const auto oldEnd = end();
+		std::uninitialized_fill_n(oldEnd, count, value);
+		// Track the new objects before rotating, since element moves can throw.
 		m_size += count;
+		std::rotate(mutPos, oldEnd, end());
 		return mutPos;
 	}
 
 	template<std::input_iterator It>
 	iterator insert(const_iterator pos, It first, It last)
 	{
-		// Can't check the size first as the iterator may not be multipass
 		assert(cbegin() <= pos && pos <= cend());
 		const auto mutPos = begin() + (pos - cbegin());
-		const auto newEnd = std::uninitialized_copy(first, last, end());
-		std::rotate(mutPos, end(), newEnd);
-		m_size = newEnd - begin();
-		assert(m_size <= N);
+		const auto oldEnd = end();
+		appendRange(first, last);
+		std::rotate(mutPos, oldEnd, end());
 		return mutPos;
 	}
 
@@ -284,6 +279,8 @@ public:
 		assert(cbegin() <= first && first <= last && last <= cend());
 		const auto mutFirst = begin() + (first - cbegin());
 		const auto mutLast = begin() + (last - cbegin());
+		// Moving an empty range onto itself can corrupt self-move-sensitive elements.
+		if (mutFirst == mutLast) { return mutFirst; }
 		const auto newEnd = std::move(mutLast, end(), mutFirst);
 		std::destroy(newEnd, end());
 		m_size = newEnd - begin();
@@ -296,7 +293,7 @@ public:
 	template<typename... Args>
 	reference emplace_back(Args&&... args)
 	{
-		assert(!full());
+		requireCapacity(1);
 		const auto result = std::construct_at(end(), std::forward<Args>(args)...);
 		++m_size;
 		return *result;
@@ -363,6 +360,33 @@ public:
 	}
 
 private:
+	void requireCapacity(size_type count) const
+	{
+		if (count > N - m_size) { throw std::length_error{"size exceeds maximum size"}; }
+	}
+
+	template<std::input_iterator It>
+	void appendRange(It first, It last)
+	{
+		// Input iterators can be single-pass, so check capacity before each construction.
+		const auto oldSize = m_size;
+		try
+		{
+			for (; first != last; ++first)
+			{
+				requireCapacity(1);
+				std::construct_at(end(), *first);
+				++m_size;
+			}
+		}
+		catch (...)
+		{
+			std::destroy(begin() + oldSize, end());
+			m_size = oldSize;
+			throw;
+		}
+	}
+
 	alignas(T) std::byte m_data[std::max(N * sizeof(T), std::size_t{1})]; // Intentionally a raw array
 	size_type m_size = 0;
 };

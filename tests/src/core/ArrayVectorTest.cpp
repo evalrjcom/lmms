@@ -28,6 +28,7 @@
 #include <QtTest>
 #include <array>
 #include <iterator>
+#include <sstream>
 
 using lmms::ArrayVector;
 
@@ -802,6 +803,29 @@ private slots:
 
 		QCOMPARE(a, bOriginal);
 		QCOMPARE(b, aOriginal);
+	}
+
+	void capacityTest()
+	{
+		using Vector = ArrayVector<int, 2>;
+		QVERIFY_EXCEPTION_THROWN(Vector(3), std::length_error);
+		QVERIFY_EXCEPTION_THROWN((Vector{1, 2, 3}), std::length_error);
+
+		Vector values{1};
+		QVERIFY_EXCEPTION_THROWN(values.insert(values.cbegin(), 2, 9), std::length_error);
+
+		// Overflow from a single-pass range must discard the newly appended elements.
+		std::istringstream input{"2 3"};
+		QVERIFY_EXCEPTION_THROWN(
+			values.insert(values.cbegin(), std::istream_iterator<int>{input}, std::istream_iterator<int>{}),
+			std::length_error);
+		QCOMPARE(values.size(), std::size_t{1});
+		QCOMPARE(values.front(), 1);
+
+		values.push_back(2);
+		QVERIFY_EXCEPTION_THROWN(values.push_back(3), std::length_error);
+		QVERIFY_EXCEPTION_THROWN(values.assign(3, 0), std::length_error);
+		QCOMPARE(values, (Vector{1, 2}));
 	}
 
 	void comparisonTest()
